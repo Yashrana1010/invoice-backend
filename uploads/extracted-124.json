@@ -1,0 +1,27 @@
+{
+  "invoiceNumber": "BFF5325002574457",
+  "invoiceDate": "2024-11-06",
+  "dueDate": null,
+  "clientName": "Yash Rana",
+  "clientAddress": "QB tower, Albatross Shipping Ltd, Phase 1, Urban Estate Jamalpur, Ludhiana 141010 Punjab",
+  "totalAmount": 13,
+  "subtotal": 11.01,
+  "taxAmount": 1.99,
+  "description": "Platform Fee, Payment Handling Charges",
+  "vendorName": "Flipkart Internet Private Limited",
+  "paymentTerms": null,
+  "currency": "INR",
+  "confidence": 0.95,
+  "extractedFields": [
+    "invoiceNumber",
+    "invoiceDate",
+    "clientName",
+    "clientAddress",
+    "totalAmount",
+    "subtotal",
+    "taxAmount",
+    "description",
+    "vendorName",
+    "currency"
+  ]
+}
