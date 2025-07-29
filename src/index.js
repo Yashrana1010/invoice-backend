@@ -17,6 +17,7 @@ const chatRoutes = require("./routes/chat");
 const dashboardRoutes = require("./routes/dashboard");
 const invoiceRoutes = require("./routes/invoices");
 const uploadRoutes = require("./routes/upload");
+const xeroRoutes = require("./routes/xero");
 const { errorHandler } = require("./middleware/errorHandler");
 const logger = require("./utils/logger");
 const { createInvoice } = require("./services/xeroService");
@@ -24,9 +25,17 @@ const { createInvoice } = require("./services/xeroService");
 const app = express();
 const PORT = process.env.PORT;
 
-// console log the environment variables onl
-console.log(process.env.VITE_XERO_CLIENT_ID);
-
+// CORS configuration
+app.use(cors({
+  origin: [
+    'https://invoicemanager.kaifoundry.com',
+    'http://localhost:3000', // for development
+    'http://localhost:5173'  // for Vite dev server
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, "..", "uploads");
@@ -144,6 +153,7 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/upload", uploadRoutes);
+app.use("/xero", xeroRoutes);
 
 // Health check
 app.get("/api/health", (req, res) => {
