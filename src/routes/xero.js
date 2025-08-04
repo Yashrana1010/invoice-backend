@@ -6,6 +6,73 @@ const TokenStore = require('../services/tokenStore');
 
 const router = express.Router();
 
+// Debug endpoint for configuration validation
+router.get('/debug/config', (req, res) => {
+  const client_id = process.env.XERO_CLIENT_ID;
+  const client_secret = process.env.XERO_CLIENT_SECRET;
+  const callback_url = process.env.XERO_CALLBACK_URL;
+  const scopes = process.env.XERO_SCOPES;
+
+  const config = {
+    hasClientId: !!client_id,
+    hasClientSecret: !!client_secret,
+    hasCallbackUrl: !!callback_url,
+    hasScopes: !!scopes,
+    clientIdLength: client_id?.length,
+    clientSecretLength: client_secret?.length,
+    clientIdPrefix: client_id?.substring(0, 8) + '...',
+    callbackUrl: callback_url,
+    scopes: scopes,
+    environment: process.env.NODE_ENV,
+    frontendUrl: process.env.FRONTEND_URL,
+    currentDomain: req.get('host'),
+    currentProtocol: req.protocol
+  };
+
+  res.json(config);
+});
+
+// Test endpoint to validate Xero API connectivity
+router.get('/debug/test-auth-url', (req, res) => {
+  try {
+    const client_id = process.env.XERO_CLIENT_ID;
+    const callback_url = process.env.XERO_CALLBACK_URL;
+    const scopes = process.env.XERO_SCOPES || 'openid profile email accounting.transactions accounting.contacts';
+
+    if (!client_id || !callback_url) {
+      return res.status(500).json({
+        error: 'Missing configuration',
+        hasClientId: !!client_id,
+        hasCallbackUrl: !!callback_url
+      });
+    }
+
+    const authUrl = new URL('https://login.xero.com/identity/connect/authorize');
+    authUrl.searchParams.append('response_type', 'code');
+    authUrl.searchParams.append('client_id', client_id);
+    authUrl.searchParams.append('redirect_uri', callback_url);
+    authUrl.searchParams.append('scope', scopes);
+    authUrl.searchParams.append('state', 'test-state-123');
+
+    res.json({
+      message: 'Test auth URL generated successfully',
+      authUrl: authUrl.toString(),
+      breakdown: {
+        baseUrl: 'https://login.xero.com/identity/connect/authorize',
+        clientId: client_id.substring(0, 8) + '...',
+        redirectUri: callback_url,
+        scopes: scopes,
+        state: 'test-state-123'
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to generate auth URL',
+      details: error.message
+    });
+  }
+});
+
 // GET /xero/auth - Initiate Xero OAuth flow
 router.get('/auth', (req, res) => {
   try {
@@ -27,12 +94,16 @@ router.get('/auth', (req, res) => {
     authUrl.searchParams.append('response_type', 'code');
     authUrl.searchParams.append('client_id', client_id);
     authUrl.searchParams.append('redirect_uri', callback_url);
-    authUrl.searchParams.append('scope', 'openid profile email accounting.transactions accounting.contacts');
+
+    // Use scopes from environment variable or fallback to default
+    const scopes = process.env.XERO_SCOPES || 'openid profile email accounting.transactions accounting.contacts accounting.settings accounting.reports.read accounting.journals.read accounting.attachments';
+    authUrl.searchParams.append('scope', scopes);
     authUrl.searchParams.append('state', state);
 
     logger.info('Initiating Xero OAuth flow', {
       clientId: client_id.substring(0, 8) + '...',
       redirectUri: callback_url,
+      scopes: scopes,
       state: state
     });
 
@@ -299,40 +370,95 @@ router.post('/callback', async (req, res) => {
   } catch (error) {
     const responseTime = Date.now() - (req.startTime || Date.now());
 
-    logger.error(`[${requestId}] Token exchange failed`, {
+    // Enhanced error logging with debug information
+    logger.error(`[${requestId}] Token exchange failed - Enhanced Debug`, {
       requestId,
       responseTime,
       error: {
         message: error.message,
         name: error.name,
         code: error.code
+      },
+      // Configuration debug
+      configDebug: {
+        hasClientId: !!process.env.XERO_CLIENT_ID,
+        hasClientSecret: !!process.env.XERO_CLIENT_SECRET,
+        clientIdLength: process.env.XERO_CLIENT_ID?.length,
+        clientSecretLength: process.env.XERO_CLIENT_SECRET?.length,
+        callbackUrl: process.env.XERO_CALLBACK_URL,
+        scopes: process.env.XERO_SCOPES,
+        nodeEnv: process.env.NODE_ENV
+      },
+      // Request debug
+      requestDebug: {
+        codeLength: req.body.code?.length,
+        hasState: !!req.body.state,
+        userAgent: req.get('User-Agent'),
+        origin: req.get('Origin'),
+        referer: req.get('Referer')
       }
     });
 
     if (error.response) {
-      logger.error(`[${requestId}] Xero API error response`, {
+      logger.error(`[${requestId}] Xero API error response - Full Details`, {
         requestId,
         status: error.response.status,
         statusText: error.response.statusText,
         data: error.response.data,
-        headers: error.response.headers
+        headers: {
+          'content-type': error.response.headers['content-type'],
+          'xero-correlation-id': error.response.headers['xero-correlation-id'],
+          'xero-activity-id': error.response.headers['xero-activity-id']
+        }
       });
 
       const xeroError = error.response.data;
+
+      // Handle specific Xero error codes
       if (xeroError && xeroError.error) {
+        let errorMessage = xeroError.error;
+        let details = xeroError.error_description || 'Unknown error';
+
+        // Provide specific guidance for common errors
+        switch (xeroError.error) {
+          case 'unauthorized_client':
+            errorMessage = 'Xero App Configuration Error';
+            details = 'Your Xero app credentials or redirect URI configuration is incorrect. Please check:\n1. Client ID and Secret are correct\n2. Redirect URI in Xero app matches: ' + process.env.XERO_CALLBACK_URL + '\n3. App has required scopes enabled\n4. App is published/approved if required';
+            break;
+          case 'invalid_grant':
+            errorMessage = 'Authorization Code Error';
+            details = 'The authorization code is invalid, expired, or already used. Please restart the OAuth flow.';
+            break;
+          case 'invalid_client':
+            errorMessage = 'Invalid Client Credentials';
+            details = 'Your Xero Client ID or Secret is incorrect. Please verify your credentials.';
+            break;
+          case 'invalid_request':
+            errorMessage = 'Invalid OAuth Request';
+            details = 'The OAuth request format is incorrect. This is likely a server configuration issue.';
+            break;
+        }
+
         return res.status(400).json({
-          error: `${xeroError.error}: ${xeroError.error_description || 'Unknown error'}`,
+          error: errorMessage,
+          details: details,
           requestId,
-          xeroErrorCode: xeroError.error
+          xeroErrorCode: xeroError.error,
+          troubleshooting: {
+            checkRedirectUri: 'Ensure your Xero app redirect URI exactly matches: ' + process.env.XERO_CALLBACK_URL,
+            checkCredentials: 'Verify your XERO_CLIENT_ID and XERO_CLIENT_SECRET are correct',
+            checkScopes: 'Ensure your Xero app has all required scopes enabled',
+            debugEndpoint: 'Visit /xero/debug/config to check your configuration'
+          }
         });
       }
 
       // Handle specific HTTP status codes
       if (error.response.status === 400) {
         return res.status(400).json({
-          error: 'Bad Request - Invalid authorization code or configuration',
+          error: 'Bad Request - OAuth Configuration Issue',
           requestId,
-          details: 'The authorization code may have expired or already been used'
+          details: 'Please check your Xero app configuration and ensure the redirect URI matches exactly'
         });
       } else if (error.response.status === 401) {
         return res.status(401).json({
