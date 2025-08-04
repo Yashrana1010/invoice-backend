@@ -557,12 +557,13 @@ router.get('/auth/url', (req, res) => {
     // Generate a random state parameter for CSRF protection
     const state = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 
-    const authUrl = `https://login.xero.com/identity/connect/authorize?` +
-      `response_type=code&` +
-      `client_id=${encodeURIComponent(client_id)}&` +
-      `redirect_uri=${encodeURIComponent(callback_url)}&` +
-      `scope=${encodeURIComponent(scopes)}&` +
-      `state=${state}`;
+    // Generate Auth URL using URL constructor (same as test script)
+    const authUrl = new URL('https://login.xero.com/identity/connect/authorize');
+    authUrl.searchParams.append('response_type', 'code');
+    authUrl.searchParams.append('client_id', client_id);
+    authUrl.searchParams.append('redirect_uri', callback_url);
+    authUrl.searchParams.append('scope', scopes);
+    authUrl.searchParams.append('state', state);
 
     logger.info(`[${requestId}] Generated Xero auth URL`, {
       requestId,
@@ -571,7 +572,7 @@ router.get('/auth/url', (req, res) => {
     });
 
     res.json({
-      authUrl,
+      authUrl: authUrl.toString(),
       state,
       requestId
     });
