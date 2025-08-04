@@ -47,6 +47,52 @@ router.get('/auth', (req, res) => {
   }
 });
 
+// GET /xero/callback - Handle OAuth callback from Xero (redirect to frontend)
+router.get('/callback', async (req, res) => {
+  const requestId = req.requestId || 'unknown';
+
+  logger.info(`[${requestId}] Xero OAuth GET callback received`, {
+    requestId,
+    hasCode: !!req.query.code,
+    hasState: !!req.query.state,
+    hasError: !!req.query.error
+  });
+
+  try {
+    const { code, state, error, error_description } = req.query;
+
+    // Build frontend URL with parameters
+    const frontendUrl = process.env.FRONTEND_URL || 'https://invoicemanager.kaifoundry.com';
+    const callbackUrl = new URL('/xero/callback', frontendUrl);
+
+    // Forward all query parameters to frontend
+    if (code) callbackUrl.searchParams.append('code', code);
+    if (state) callbackUrl.searchParams.append('state', state);
+    if (error) callbackUrl.searchParams.append('error', error);
+    if (error_description) callbackUrl.searchParams.append('error_description', error_description);
+
+    logger.info(`[${requestId}] Redirecting to frontend callback`, {
+      requestId,
+      redirectUrl: callbackUrl.toString()
+    });
+
+    // Redirect to frontend
+    res.redirect(callbackUrl.toString());
+
+  } catch (error) {
+    logger.error(`[${requestId}] Error handling GET callback`, {
+      requestId,
+      error: error.message
+    });
+
+    const frontendUrl = process.env.FRONTEND_URL || 'https://invoicemanager.kaifoundry.com';
+    const errorUrl = new URL('/login', frontendUrl);
+    errorUrl.searchParams.append('error', 'callback_processing_failed');
+
+    res.redirect(errorUrl.toString());
+  }
+});
+
 // POST /xero/callback - Handle OAuth callback and token exchange
 router.post('/callback', async (req, res) => {
   const requestId = req.requestId || 'unknown';
