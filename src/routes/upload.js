@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const { authenticateToken } = require('../middleware/auth');
 const { parseDocument, validateFile } = require('../services/documentParsingService');
 const { extractInvoiceData } = require('../services/invoiceExtractionService');
@@ -12,10 +13,47 @@ const logger = require('../utils/logger');
 const router = express.Router();
 
 const XERO_TENANT_ID = process.env.XERO_TENANT_ID || "c8b88426-261c-409a-8258-d9c3fb365d76";
+
+// Ensure uploads directory exists
+const uploadsDir = path.resolve(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  try {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    logger.info(`Created uploads directory: ${uploadsDir}`);
+  } catch (error) {
+    logger.error(`Failed to create uploads directory: ${error.message}`);
+  }
+} else {
+  logger.info(`Uploads directory exists: ${uploadsDir}`);
+}
+
+// Log directory permissions and stats
+try {
+  const stats = fs.statSync(uploadsDir);
+  logger.info(`Uploads directory stats:`, {
+    path: uploadsDir,
+    isDirectory: stats.isDirectory(),
+    mode: stats.mode.toString(8),
+    uid: stats.uid,
+    gid: stats.gid
+  });
+} catch (error) {
+  logger.error(`Failed to get uploads directory stats: ${error.message}`);
+}
+
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/');
+    // Use absolute path and ensure directory exists
+    if (!fs.existsSync(uploadsDir)) {
+      try {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      } catch (error) {
+        logger.error(`Failed to create uploads directory: ${error.message}`);
+        return cb(error);
+      }
+    }
+    cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -35,13 +73,48 @@ const upload = multer({
     }
     cb(null, true);
   }
-});
+}).single('document');
+
+// Wrap upload middleware to handle errors better
+const handleUpload = (req, res, next) => {
+  upload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      logger.error('Multer error:', err);
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          error: 'File too large',
+          details: 'File size exceeds 10MB limit'
+        });
+      }
+      return res.status(400).json({
+        error: 'Upload error',
+        details: err.message
+      });
+    } else if (err) {
+      logger.error('Upload error:', err);
+      return res.status(400).json({
+        error: 'Upload failed',
+        details: err.message
+      });
+    }
+    next();
+  });
+};
 
 // Upload and process invoice document
-router.post('/invoice', authenticateToken, upload.single('document'), async (req, res) => {
+router.post('/invoice', authenticateToken, handleUpload, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Validate that the file actually exists
+    if (!fs.existsSync(req.file.path)) {
+      logger.error(`File not found after upload: ${req.file.path}`);
+      return res.status(500).json({
+        error: 'File upload failed',
+        details: 'File was not saved properly on the server'
+      });
     }
 
     const userId = req.user.email || req.user.sub || req.user.id;
@@ -51,7 +124,11 @@ router.post('/invoice', authenticateToken, upload.single('document'), async (req
       return res.status(400).json({ error: 'Invalid token - no user identifier found' });
     }
 
-    logger.info(`Processing uploaded file: ${req.file.originalname} for user ${userId}`);
+    logger.info(`Processing uploaded file: ${req.file.originalname} for user ${userId}`, {
+      filePath: req.file.path,
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype
+    });
 
     // Parse the document
     const documentText = await parseDocument(req.file.path, req.file.mimetype);
@@ -156,10 +233,19 @@ router.post('/invoice', authenticateToken, upload.single('document'), async (req
 });
 
 // Upload and extract data without creating invoice
-router.post('/extract', authenticateToken, upload.single('document'), async (req, res) => {
+router.post('/extract', authenticateToken, handleUpload, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Validate that the file actually exists
+    if (!fs.existsSync(req.file.path)) {
+      logger.error(`File not found after upload: ${req.file.path}`);
+      return res.status(500).json({
+        error: 'File upload failed',
+        details: 'File was not saved properly on the server'
+      });
     }
 
     const userId = req.user.email || req.user.sub || req.user.id;
@@ -170,7 +256,11 @@ router.post('/extract', authenticateToken, upload.single('document'), async (req
       return res.status(400).json({ error: 'Invalid token - no user identifier found' });
     }
 
-    logger.info(`Extracting data from: ${req.file.originalname} for user ${userId}`);
+    logger.info(`Extracting data from: ${req.file.originalname} for user ${userId}`, {
+      filePath: req.file.path,
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype
+    });
 
     // Parse the document
     const documentText = await parseDocument(req.file.path, req.file.mimetype);
@@ -260,6 +350,55 @@ router.get('/supported-types', (req, res) => {
     maxFileSize: '10MB',
     description: 'Supported file types for invoice processing'
   });
+});
+
+// Debug endpoint to check upload directory status
+router.get('/debug', authenticateToken, (req, res) => {
+  try {
+    const uploadsPath = path.resolve(process.cwd(), 'uploads');
+    const exists = fs.existsSync(uploadsPath);
+    let stats = null;
+    let files = [];
+
+    if (exists) {
+      stats = fs.statSync(uploadsPath);
+      try {
+        files = fs.readdirSync(uploadsPath);
+      } catch (error) {
+        files = [`Error reading directory: ${error.message}`];
+      }
+    }
+
+    res.json({
+      uploadsDirectory: {
+        path: uploadsPath,
+        exists,
+        stats: stats ? {
+          isDirectory: stats.isDirectory(),
+          mode: stats.mode.toString(8),
+          uid: stats.uid,
+          gid: stats.gid,
+          size: stats.size,
+          created: stats.birthtime,
+          modified: stats.mtime
+        } : null,
+        fileCount: files.length,
+        files: files.slice(0, 10) // Show first 10 files
+      },
+      server: {
+        cwd: process.cwd(),
+        platform: process.platform,
+        nodeVersion: process.version,
+        uptime: process.uptime()
+      }
+    });
+  } catch (error) {
+    logger.error('Debug endpoint error:', error);
+    res.status(500).json({
+      error: 'Debug failed',
+      message: error.message
+    });
+  }
 });
 
 // Create invoice in Xero from extracted data

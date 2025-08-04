@@ -38,10 +38,28 @@ app.use(cors({
 }));
 
 // Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, "..", "uploads");
+const uploadsDir = path.resolve(process.cwd(), "uploads");
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-  logger.info("Created uploads directory");
+  try {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    logger.info(`Created uploads directory: ${uploadsDir}`);
+  } catch (error) {
+    logger.error(`Failed to create uploads directory: ${error.message}`);
+  }
+} else {
+  logger.info(`Uploads directory exists: ${uploadsDir}`);
+}
+
+// Log directory permissions for debugging
+try {
+  const stats = fs.statSync(uploadsDir);
+  logger.info(`Uploads directory stats:`, {
+    path: uploadsDir,
+    isDirectory: stats.isDirectory(),
+    mode: stats.mode.toString(8)
+  });
+} catch (error) {
+  logger.error(`Failed to get uploads directory stats: ${error.message}`);
 }
 
 // Security middleware
