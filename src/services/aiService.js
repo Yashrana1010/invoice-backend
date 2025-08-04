@@ -1,52 +1,59 @@
 const { detectIntent, generateConversationalResponse, getPendingExtractedData, clearPendingExtractedData, displayInvoiceData } = require('./langchainService');
 const { extractFinancialData } = require('./extractionService');
 const logger = require('../utils/logger');
+const { createInvoice, getTenantId } = require('./xeroService');
 
 async function processMessage(message, userId, conversationId, accessToken) {
   logger.info(`Processing message: "${message}" for user ${userId}`);
 
   // Step 1: Detect intent using LangChain with Gemini
   const intent = await detectIntent(message, userId, conversationId);
+  let mergedData = {}; // Changed const to let and removed duplicate declaration
 
   logger.info(`Detected intent: ${intent.intent} with confidence: ${intent.confidence}`);
 
-  if(!intent || intent.intent !== 'DISPLAY_INVOICE') 
-  {// Step 2: Extract financial data using regex (as backup)
-  const extractedData = extractFinancialData(message);
+  if (!intent || intent.intent !== 'DISPLAY_INVOICE') {
+    // Step 2: Extract financial data using regex (as backup)
+    const extractedData = extractFinancialData(message);
 
-  // Step 3: Merge AI entities with regex extraction (prioritize AI entities)
-  let mergedData = {
-    ...extractedData,
-    ...intent.entities
-  };
+    // Step 3: Merge AI entities with regex extraction (prioritize AI entities)
+    mergedData = { // Removed let declaration since it's already declared above
+      ...extractedData,
+      ...intent.entities
+    };
 
-  // Step 4: If intent is CREATE_INVOICE or RECORD_TRANSACTION and required fields are missing,
-  // try to merge in pending extracted data from conversation context
-  if (
-    (intent.intent === 'CREATE_INVOICE' || intent.intent === 'RECORD_TRANSACTION') &&
-    (!mergedData.client || !mergedData.amount)
-  ) {
-    const pending = getPendingExtractedData(userId, conversationId || 'default');
-    if (pending) {
-      mergedData = {
-        ...pending,
-        ...mergedData // user message takes precedence if present
-      };
-    }
+    logger.info(`AI entities: ${JSON.stringify(intent.entities)}`);
+    logger.info(`Regex extracted: ${JSON.stringify(extractedData)}`);
     logger.info(`Merged data: ${JSON.stringify(mergedData)}`);
-  }};
+
+    // Step 4: If intent is CREATE_INVOICE or RECORD_TRANSACTION and required fields are missing,
+    // try to merge in pending extracted data from conversation context
+    if (
+      (intent.intent === 'CREATE_INVOICE' || intent.intent === 'RECORD_TRANSACTION') &&
+      (!mergedData.client || !mergedData.amount)
+    ) {
+      const pending = getPendingExtractedData(userId, conversationId || 'default');
+      if (pending) {
+        mergedData = {
+          ...pending,
+          ...mergedData // user message takes precedence if present
+        };
+      }
+      logger.info(`Merged data: ${JSON.stringify(mergedData)}`);
+    }
+  }
 
 
   // Step 5: Process based on intent
   let response;
   switch (intent.intent) {
     case 'CREATE_INVOICE':
-      response = await handleInvoiceCreation(mergedData, userId, message, conversationId);
+      response = await handleInvoiceCreation(mergedData, userId, message, conversationId, accessToken);
       // Clear pending extracted data after use
       clearPendingExtractedData(userId, conversationId || 'default');
       break;
     case 'RECORD_TRANSACTION':
-      response = await handleTransactionRecord(mergedData, userId, message, conversationId);
+      response = await handleTransactionRecord(mergedData, userId, message, conversationId, accessToken);
       clearPendingExtractedData(userId, conversationId || 'default');
       break;
     case 'GENERATE_BALANCE_SHEET':
@@ -54,7 +61,7 @@ async function processMessage(message, userId, conversationId, accessToken) {
       break;
     case 'DISPLAY_INVOICE':
       // Use LangChain to generate conversational response for invoice display
-      response = await displayInvoiceData(message, userId, conversationId,  accessToken);
+      response = await displayInvoiceData(message, userId, conversationId, accessToken);
       break;
     default:
       response = await handleGeneralInquiry(message, userId, conversationId);
@@ -63,7 +70,7 @@ async function processMessage(message, userId, conversationId, accessToken) {
   return response;
 }
 
-async function handleInvoiceCreation(data, userId, originalMessage, conversationId) {
+async function handleInvoiceCreation(data, userId, originalMessage, conversationId, accessToken) {
   try {
     // Enhanced validation with helpful prompts
     const missingFields = [];
@@ -91,18 +98,17 @@ async function handleInvoiceCreation(data, userId, originalMessage, conversation
 
     const amount = parseFloat(data.amount);
     const invoiceData = {
-      client: data.client,
-      amount: amount,
+      clientName: data.client,
+      totalAmount: amount,
       description: data.description || 'Professional services',
-      date: data.date || new Date().toISOString().split('T')[0],
-      userId
+      invoiceDate: data.date || new Date().toISOString().split('T')[0],
+      currency: 'INR'  // Set to INR to match your Xero setup
     };
 
-    const invoice = await createInvoice(invoiceData);
+    const invoice = await createInvoice(invoiceData, accessToken, null, userId);
 
     return {
-      message: `✅ Perfect! I've created your invoice successfully!\n\n📄 **Invoice #${invoice.invoice_number}**\n👤 **Client:** ${data.client}\n💰 **Amount:** $${amount.toFixed(2)}\n📝 **Description:** ${invoiceData.description}\n\nIs there anything else you'd like me to help you with? 😊`,
-      data: invoice,
+      message: `✅ Perfect! I've created your invoice successfully!\n\n📄 **Invoice #${invoice.InvoiceNumber || 'N/A'}**\n👤 **Client:** ${data.client}\n💰 **Amount:** $${amount.toFixed(2)}\n📝 **Description:** ${invoiceData.description}\n\nIs there anything else you'd like me to help you with? 😊`,
       success: true,
       conversational: true
     };
@@ -117,7 +123,7 @@ async function handleInvoiceCreation(data, userId, originalMessage, conversation
   }
 }
 
-async function handleTransactionRecord(data, userId, originalMessage, conversationId) {
+async function handleTransactionRecord(data, userId, originalMessage, conversationId, accessToken) {
   try {
     const missingFields = [];
 

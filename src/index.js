@@ -89,37 +89,60 @@ passport.deserializeUser((obj, done) => {
   done(null, obj);
 });
 
-// API Request Logging Middleware
+// Enhanced API Request Logging Middleware
 app.use((req, res, next) => {
   const startTime = Date.now();
   const requestId = Math.random().toString(36).substr(2, 9);
+  const timestamp = new Date().toISOString();
 
   // Add request ID to request object for tracking
   req.requestId = requestId;
 
-  // Log incoming request
-  logger.info(`[${requestId}] ${req.method} ${req.originalUrl}`, {
-    requestId,
-    method: req.method,
-    url: req.originalUrl,
-  });
+  // Enhanced readable logging for incoming request
+  const requestInfo = [
+    `🚀 [${requestId}]`,
+    `${req.method.padEnd(6)}`,
+    `${req.originalUrl}`,
+    `| ${timestamp}`,
+    req.ip ? `| IP: ${req.ip}` : '',
+    Object.keys(req.query).length > 0 ? `| Query: ${JSON.stringify(req.query)}` : '',
+    req.headers['user-agent'] ? `| UA: ${req.headers['user-agent'].substring(0, 50)}...` : ''
+  ].filter(Boolean).join(' ');
+
+  console.log(`\n${requestInfo}`);
+
+  // Log request body for POST/PUT requests (with size limit for readability)
+  if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
+    const bodyStr = JSON.stringify(req.body);
+    const truncatedBody = bodyStr.length > 500 ? bodyStr.substring(0, 500) + '...' : bodyStr;
+    console.log(`📦 [${requestId}] Request Body: ${truncatedBody}`);
+  }
 
   // Override res.json to log response
   const originalJson = res.json;
   res.json = function (data) {
     const responseTime = Date.now() - startTime;
+    const statusEmoji = res.statusCode >= 400 ? '❌' : res.statusCode >= 300 ? '🔄' : '✅';
 
-    // Log response
-    logger.info(
-      `[${requestId}] Response ${res.statusCode} - ${responseTime}ms`,
-      {
-        requestId,
-        statusCode: res.statusCode,
-        responseTime,
-        method: req.method,
-        url: req.originalUrl,
-      }
-    );
+    const responseInfo = [
+      `${statusEmoji} [${requestId}]`,
+      `${req.method.padEnd(6)}`,
+      `${req.originalUrl}`,
+      `| Status: ${res.statusCode}`,
+      `| ${responseTime}ms`,
+      `| ${new Date().toISOString()}`
+    ].join(' ');
+
+    console.log(responseInfo);
+
+    // Log response data for errors or when explicitly needed
+    if (res.statusCode >= 400) {
+      const responseStr = JSON.stringify(data);
+      const truncatedResponse = responseStr.length > 300 ? responseStr.substring(0, 300) + '...' : responseStr;
+      console.log(`💬 [${requestId}] Response Data: ${truncatedResponse}`);
+    }
+
+    console.log(`─────────────────────────────────────────────────────────────`);
 
     return originalJson.call(this, data);
   };
@@ -128,18 +151,26 @@ app.use((req, res, next) => {
   const originalSend = res.send;
   res.send = function (data) {
     const responseTime = Date.now() - startTime;
+    const statusEmoji = res.statusCode >= 400 ? '❌' : res.statusCode >= 300 ? '🔄' : '✅';
 
-    // Log response
-    logger.info(
-      `[${requestId}] Response ${res.statusCode} - ${responseTime}ms`,
-      {
-        requestId,
-        statusCode: res.statusCode,
-        responseTime,
-        method: req.method,
-        url: req.originalUrl,
-      }
-    );
+    const responseInfo = [
+      `${statusEmoji} [${requestId}]`,
+      `${req.method.padEnd(6)}`,
+      `${req.originalUrl}`,
+      `| Status: ${res.statusCode}`,
+      `| ${responseTime}ms`,
+      `| ${new Date().toISOString()}`
+    ].join(' ');
+
+    console.log(responseInfo);
+
+    // Log response data for errors or when explicitly needed
+    if (res.statusCode >= 400 && typeof data === 'string') {
+      const truncatedData = data.length > 300 ? data.substring(0, 300) + '...' : data;
+      console.log(`💬 [${requestId}] Response Data: ${truncatedData}`);
+    }
+
+    console.log(`─────────────────────────────────────────────────────────────`);
 
     return originalSend.call(this, data);
   };
@@ -163,8 +194,27 @@ app.get("/api/health", (req, res) => {
 // Enhanced Error Logging Middleware
 app.use((err, req, res, next) => {
   const requestId = req.requestId || "unknown";
+  const timestamp = new Date().toISOString();
 
-  // Log detailed error information
+  // Enhanced readable error logging
+  console.log(`\n🔥 ERROR OCCURRED 🔥`);
+  console.log(`═══════════════════════════════════════════════════════════`);
+  console.log(`📍 Request ID: ${requestId}`);
+  console.log(`🕐 Timestamp: ${timestamp}`);
+  console.log(`🌐 Method: ${req.method} | URL: ${req.originalUrl}`);
+  console.log(`❌ Error Name: ${err.name}`);
+  console.log(`💥 Error Message: ${err.message}`);
+  console.log(`🔢 Status Code: ${err.status || err.statusCode || 500}`);
+
+  if (err.code) {
+    console.log(`🏷️  Error Code: ${err.code}`);
+  }
+
+  console.log(`📚 Stack Trace:`);
+  console.log(err.stack);
+  console.log(`═══════════════════════════════════════════════════════════\n`);
+
+  // Also keep the structured logging for log files
   logger.error(`[${requestId}] API Error`, {
     requestId,
     error: {
@@ -178,17 +228,27 @@ app.use((err, req, res, next) => {
       method: req.method,
       url: req.originalUrl,
     },
-    timestamp: new Date().toISOString(),
+    timestamp,
   });
 
   // Call the original error handler
   errorHandler(err, req, res, next);
 });
 
-// 404 handler with logging
+// Enhanced 404 handler
 app.use("*", (req, res) => {
   const requestId = req.requestId || "unknown";
+  const timestamp = new Date().toISOString();
 
+  console.log(`\n🔍 404 - ROUTE NOT FOUND`);
+  console.log(`────────────────────────────────────────────────────────────`);
+  console.log(`📍 Request ID: ${requestId}`);
+  console.log(`🕐 Timestamp: ${timestamp}`);
+  console.log(`🌐 Method: ${req.method} | URL: ${req.originalUrl}`);
+  console.log(`💡 Available routes might be checked in your route files`);
+  console.log(`────────────────────────────────────────────────────────────\n`);
+
+  // Keep structured logging for files
   logger.warn(
     `[${requestId}] Route not found: ${req.method} ${req.originalUrl}`,
     {
@@ -206,8 +266,18 @@ app.use("*", (req, res) => {
   });
 });
 
-// Global uncaught exception handler
+// Enhanced global exception handlers
 process.on("uncaughtException", (err) => {
+  console.log(`\n💀 UNCAUGHT EXCEPTION 💀`);
+  console.log(`═══════════════════════════════════════════════════════════`);
+  console.log(`🕐 Timestamp: ${new Date().toISOString()}`);
+  console.log(`❌ Error Name: ${err.name}`);
+  console.log(`💥 Error Message: ${err.message}`);
+  console.log(`📚 Stack Trace:`);
+  console.log(err.stack);
+  console.log(`🚨 Process will exit...`);
+  console.log(`═══════════════════════════════════════════════════════════\n`);
+
   logger.error("Uncaught Exception:", {
     error: {
       message: err.message,
@@ -219,15 +289,31 @@ process.on("uncaughtException", (err) => {
   process.exit(1);
 });
 
-// Global unhandled rejection handler
 process.on("unhandledRejection", (reason, promise) => {
+  console.log(`\n⚠️  UNHANDLED PROMISE REJECTION ⚠️`);
+  console.log(`═══════════════════════════════════════════════════════════`);
+  console.log(`🕐 Timestamp: ${new Date().toISOString()}`);
+  console.log(`💥 Reason: ${reason}`);
+  console.log(`📝 Promise: ${promise}`);
+  console.log(`═══════════════════════════════════════════════════════════\n`);
+
   logger.error("Unhandled Rejection:", {
     reason: reason,
     promise: promise,
   });
 });
 
+// Enhanced server start logging
 app.listen(PORT, () => {
+  console.log(`\n🚀 SERVER STARTED SUCCESSFULLY 🚀`);
+  console.log(`═══════════════════════════════════════════════════════════`);
+  console.log(`🌐 Port: ${PORT}`);
+  console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌍 CORS Origins: ${process.env.FRONTEND_URL || 'localhost'}`);
+  console.log(`🕐 Started at: ${new Date().toISOString()}`);
+  console.log(`📝 Logs: Both console and file logging active`);
+  console.log(`═══════════════════════════════════════════════════════════\n`);
+
   logger.info(`Server running on port ${PORT}`, {
     port: PORT,
     environment: process.env.NODE_ENV,

@@ -2,7 +2,7 @@ const logger = require('../utils/logger');
 
 // Enhanced regex patterns for extracting financial data
 const patterns = {
-  amount: /\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/g,
+  amount: /\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g, // Added support for plain numbers like 15000
   date: /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})|(\d{4}-\d{2}-\d{2})/g,
   email: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
   clientName: /(?:for|to|from|client|customer)\s+([A-Za-z](?:[a-zA-Z\s]{1,28}[A-Za-z])?)/gi,
@@ -12,7 +12,7 @@ const patterns = {
 
 function extractFinancialData(message) {
   const data = {};
-  
+
   try {
     logger.info(`Extracting financial data from: "${message}"`);
 
@@ -38,7 +38,7 @@ function extractFinancialData(message) {
       // Clean and validate client name
       let clientName = clientMatches[0][1].trim();
       clientName = clientName.replace(/\s+/g, ' '); // normalize spaces
-      
+
       // Validate client name (should be reasonable length and contain letters)
       if (clientName.length >= 2 && clientName.length <= 50 && /[a-zA-Z]/.test(clientName)) {
         data.client = clientName;
@@ -77,20 +77,20 @@ function extractFinancialData(message) {
 function normalizeDate(dateString) {
   try {
     logger.info(`Normalizing date: ${dateString}`);
-    
+
     // Handle different date formats
     let date;
-    
+
     // Try parsing MM/DD/YYYY or MM-DD-YYYY
     if (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(dateString)) {
       const parts = dateString.split(/[\/\-]/);
       if (parts.length === 3) {
         let year = parseInt(parts[2]);
         if (year < 100) year += 2000; // Convert 2-digit year to 4-digit
-        
+
         date = new Date(year, parseInt(parts[0]) - 1, parseInt(parts[1]));
       }
-    } 
+    }
     // Try parsing YYYY-MM-DD
     else if (/\d{4}-\d{2}-\d{2}/.test(dateString)) {
       date = new Date(dateString);
@@ -99,12 +99,12 @@ function normalizeDate(dateString) {
     else {
       date = new Date(dateString);
     }
-    
+
     if (isNaN(date.getTime())) {
       logger.warn(`Invalid date: ${dateString}`);
       return null;
     }
-    
+
     const normalized = date.toISOString().split('T')[0];
     logger.info(`Normalized date: ${normalized}`);
     return normalized;
@@ -118,7 +118,7 @@ function extractDescription(message, extractedData) {
   try {
     // Start with the original message
     let cleanMessage = message;
-    
+
     // Remove common command phrases
     const removePatterns = [
       /create\s+(?:an?\s+)?invoice/gi,
@@ -139,7 +139,7 @@ function extractDescription(message, extractedData) {
       const clientPattern = new RegExp(`\\b${extractedData.client.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
       cleanMessage = cleanMessage.replace(clientPattern, '');
     }
-    
+
     if (extractedData.amount) {
       const amountPattern = new RegExp(`\\$?${extractedData.amount.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'gi');
       cleanMessage = cleanMessage.replace(amountPattern, '');
@@ -188,7 +188,7 @@ function extractDescription(message, extractedData) {
 // Additional utility functions for specific extractions
 function extractClientInfo(message) {
   const clientInfo = {};
-  
+
   // More sophisticated client name extraction
   const clientPatterns = [
     /(?:client|customer|for|to)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)/g,
@@ -208,7 +208,7 @@ function extractClientInfo(message) {
 
 function extractInvoiceDetails(message) {
   const details = {};
-  
+
   // Extract due date
   const dueDatePattern = /due\s+(?:on\s+)?(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/gi;
   const dueDateMatch = message.match(dueDatePattern);

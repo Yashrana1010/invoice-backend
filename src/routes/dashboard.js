@@ -7,17 +7,21 @@ const router = express.Router();
 // Get dashboard summary
 router.get('/summary', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
-    
+    const userId = req.user.email || req.user.sub || req.user.id;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Invalid token - no user identifier found' });
+    }
+
     // Get balance sheet data
     const balanceSheet = await generateBalanceSheet(userId);
-    
+
     // Get recent transactions
     const recentTransactions = await getTransactions(userId, { limit: 5 });
-    
+
     // Get pending invoices
     const pendingInvoices = await getInvoices(userId, { status: 'pending' });
-    
+
     const summary = {
       totalRevenue: balanceSheet.totalRevenue,
       totalInvoices: balanceSheet.totalInvoices,
@@ -30,7 +34,7 @@ router.get('/summary', authenticateToken, async (req, res) => {
         client: txn.client || 'Internal'
       }))
     };
-    
+
     res.json(summary);
   } catch (error) {
     logger.error('Dashboard summary error:', error);
@@ -41,7 +45,12 @@ router.get('/summary', authenticateToken, async (req, res) => {
 // Get balance sheet
 router.get('/balance-sheet', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.email || req.user.sub || req.user.id;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Invalid token - no user identifier found' });
+    }
+
     const balanceSheet = await generateBalanceSheet(userId);
     res.json(balanceSheet);
   } catch (error) {

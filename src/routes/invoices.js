@@ -9,9 +9,13 @@ const router = express.Router();
 // Get all invoices
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.email || req.user.sub || req.user.id;
     const { status, limit } = req.query;
-    
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Invalid token - no user identifier found' });
+    }
+
     const invoices = await getInvoices(userId, { status, limit: parseInt(limit) || 50 });
     res.json(invoices);
   } catch (error) {
@@ -23,9 +27,13 @@ router.get('/', authenticateToken, async (req, res) => {
 // Get all transactions
 router.get('/transactions', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user.email || req.user.sub || req.user.id;
     const { type, limit } = req.query;
-    
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Invalid token - no user identifier found' });
+    }
+
     const transactions = await getTransactions(userId, { type, limit: parseInt(limit) || 50 });
     res.json(transactions);
   } catch (error) {

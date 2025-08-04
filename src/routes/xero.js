@@ -2,8 +2,50 @@
 const express = require('express');
 const axios = require('axios');
 const logger = require('../utils/logger');
+const TokenStore = require('../services/tokenStore');
 
 const router = express.Router();
+
+// GET /xero/auth - Initiate Xero OAuth flow
+router.get('/auth', (req, res) => {
+  try {
+    const client_id = process.env.XERO_CLIENT_ID;
+    const callback_url = process.env.XERO_CALLBACK_URL;
+
+    if (!client_id || !callback_url) {
+      logger.error('Missing Xero OAuth configuration');
+      return res.status(500).json({
+        error: 'Server configuration error - missing OAuth credentials'
+      });
+    }
+
+    // Generate state parameter for security
+    const state = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+
+    // Xero OAuth 2.0 authorization URL
+    const authUrl = new URL('https://login.xero.com/identity/connect/authorize');
+    authUrl.searchParams.append('response_type', 'code');
+    authUrl.searchParams.append('client_id', client_id);
+    authUrl.searchParams.append('redirect_uri', callback_url);
+    authUrl.searchParams.append('scope', 'openid profile email accounting.transactions accounting.contacts');
+    authUrl.searchParams.append('state', state);
+
+    logger.info('Initiating Xero OAuth flow', {
+      clientId: client_id.substring(0, 8) + '...',
+      redirectUri: callback_url,
+      state: state
+    });
+
+    res.json({
+      authUrl: authUrl.toString(),
+      state: state
+    });
+
+  } catch (error) {
+    logger.error('Error initiating Xero auth:', error);
+    res.status(500).json({ error: 'Failed to initiate authentication' });
+  }
+});
 
 // POST /xero/callback - Handle OAuth callback and token exchange
 router.post('/callback', async (req, res) => {
@@ -136,6 +178,56 @@ router.post('/callback', async (req, res) => {
       }
     }
 
+    // Get tenant information
+    let tenants = [];
+    try {
+      logger.info(`[${requestId}] Fetching tenant information`);
+      const tenantsResponse = await axios.get('https://api.xero.com/connections', {
+        headers: {
+          'Authorization': `Bearer ${access_token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      tenants = tenantsResponse.data;
+      logger.info(`[${requestId}] Found ${tenants.length} tenants`);
+    } catch (tenantError) {
+      logger.error(`[${requestId}] Failed to fetch tenants`, {
+        requestId,
+        error: tenantError.message
+      });
+    }
+
+    // Store tokens for the user (using both email and sub for lookup)
+    let userId = null;
+    if (user_info && (user_info.email || user_info.sub)) {
+      const email = user_info.email;
+      const sub = user_info.sub;
+
+      // Store tokens with tenant ID
+      const tokensToStore = {
+        access_token,
+        refresh_token,
+        expires_in,
+        tenant_id: tenants.length > 0 ? tenants[0].tenantId : process.env.XERO_TENANT_ID
+      };
+
+      // Store tokens using email as primary identifier (if available)
+      if (email) {
+        userId = email;
+        TokenStore.storeUserTokens(email, tokensToStore);
+        logger.info(`[${requestId}] Stored tokens for user ${email}`);
+      }
+
+      // Also store tokens using sub as identifier for access token lookups
+      if (sub && sub !== email) {
+        TokenStore.storeUserTokens(sub, tokensToStore);
+        logger.info(`[${requestId}] Stored tokens for sub ${sub}`);
+      }
+
+      // Set primary userId for response
+      userId = email || sub;
+    }
+
     // Return tokens to frontend
     const responseData = {
       access_token,
@@ -144,7 +236,9 @@ router.post('/callback', async (req, res) => {
       expires_in,
       token_type,
       user_info,
-      timestamp: new Date().toISOString()
+      tenants,
+      timestamp: new Date().toISOString(),
+      userId: userId
     };
 
     logger.info(`[${requestId}] Sending tokens to frontend`, {
@@ -270,6 +364,84 @@ router.get('/auth/url', (req, res) => {
       requestId
     });
   }
+});
+
+// POST /xero/store-tokens - Store tokens for a user
+router.post('/store-tokens', async (req, res) => {
+  const requestId = req.requestId || 'unknown';
+
+  try {
+    const { userId, access_token, refresh_token, expires_in, tenant_id } = req.body;
+
+    if (!userId || !access_token) {
+      return res.status(400).json({
+        error: 'userId and access_token are required',
+        requestId
+      });
+    }
+
+    const tokensToStore = {
+      access_token,
+      refresh_token,
+      expires_in: expires_in || 1800, // default 30 minutes
+      tenant_id: tenant_id || process.env.XERO_TENANT_ID
+    };
+
+    TokenStore.storeUserTokens(userId, tokensToStore);
+
+    logger.info(`[${requestId}] Tokens stored for user ${userId}`);
+
+    res.json({
+      success: true,
+      message: 'Tokens stored successfully',
+      requestId
+    });
+
+  } catch (error) {
+    logger.error(`[${requestId}] Failed to store tokens`, {
+      requestId,
+      error: error.message
+    });
+
+    res.status(500).json({
+      error: 'Failed to store tokens',
+      requestId
+    });
+  }
+});
+
+// GET /xero/tokens/status - Check if user has valid tokens
+router.get('/tokens/status', (req, res) => {
+  const requestId = req.requestId || 'unknown';
+  const { userId } = req.query;
+
+  if (!userId) {
+    return res.status(400).json({
+      error: 'userId is required',
+      requestId
+    });
+  }
+
+  const hasValidTokens = TokenStore.hasValidTokens(userId);
+
+  res.json({
+    hasValidTokens,
+    userId,
+    requestId
+  });
+});
+
+// GET /xero/tokens/debug - Debug endpoint to see all stored tokens (development only)
+router.get('/tokens/debug', (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Debug endpoint not available in production' });
+  }
+
+  const allTokens = TokenStore.listAllTokens();
+  res.json({
+    tokens: allTokens,
+    count: Object.keys(allTokens).length
+  });
 });
 
 module.exports = router;

@@ -4,8 +4,9 @@ const path = require('path');
 const { authenticateToken } = require('../middleware/auth');
 const { parseDocument, validateFile } = require('../services/documentParsingService');
 const { extractInvoiceData } = require('../services/invoiceExtractionService');
-const { createInvoice ,getTenantId} = require('../services/xeroService');
+const { createInvoice, getTenantId } = require('../services/xeroService');
 const { setPendingExtractedData } = require('../services/langchainService');
+const TokenStore = require('../services/tokenStore');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -43,8 +44,12 @@ router.post('/invoice', authenticateToken, upload.single('document'), async (req
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const userId = req.user.userId;
+    const userId = req.user.email || req.user.sub || req.user.id;
     const { autoCreate = false } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Invalid token - no user identifier found' });
+    }
 
     logger.info(`Processing uploaded file: ${req.file.originalname} for user ${userId}`);
 
@@ -70,43 +75,62 @@ router.post('/invoice', authenticateToken, upload.single('document'), async (req
     // Auto-create invoice if requested and we have enough data
     if (autoCreate && canAutoCreateInvoice(extractedData)) {
       try {
-        const invoiceData = {
-          Type: 'ACCREC',
-          Contact: {
-            Name: extractedData.clientName || undefined,
-            ContactID: extractedData.clientId || undefined
-          },
-          DateString: extractedData.invoiceDate || new Date().toISOString(),
-          DueDateString: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString(),
-          InvoiceNumber: extractedData.invoiceNumber || `INV-${Date.now()}`,
-          Reference: extractedData.reference || '',
-          SubTotal: extractedData.subtotal ? extractedData.subtotal.toFixed(2) : '0.00',
-          TotalTax: extractedData.taxAmount ? extractedData.taxAmount.toFixed(2) :
-            '0.00',
-          Total: extractedData.totalAmount ? extractedData.totalAmount.toFixed(2) : '0.00',
-          LineItems: extractedData.lineItems.map(item => ({
-            ItemCode: item.itemCode || undefined,
-            Description: item.description || undefined,
-            Quantity: item.quantity ? item.quantity.toString() : '1',
-            UnitAmount: item.unitAmount ? item.unitAmount.toFixed(2) : '0.00',
-            TaxType: item.taxType || 'OUTPUT',
-            TaxAmount: item.taxAmount ? item.taxAmount.toFixed(2) : '0.00',
-            LineAmount: item.lineAmount ? item.lineAmount.toFixed(2) : '0.00',
-            AccountCode: item.accountCode || '200',
-            Tracking: item.tracking || []
-          }))
-        };
+        // Get stored Xero access token for the user
+        const xeroAccessToken = TokenStore.getAccessToken(userId);
+        const xeroTenantId = TokenStore.getTenantId(userId);
 
+        if (!xeroAccessToken) {
+          logger.warn(`No Xero access token found for user ${userId}`);
+          response.autoCreateError = 'Xero authentication required. Please authenticate with Xero first.';
+        } else {
+          logger.info('Extracted data for Xero invoice creation:', {
+            userId,
+            clientName: extractedData.clientName,
+            totalAmount: extractedData.totalAmount,
+            subtotal: extractedData.subtotal,
+            taxAmount: extractedData.taxAmount,
+            invoiceNumber: extractedData.invoiceNumber,
+            lineItemsCount: extractedData.lineItems?.length || 0
+          });
 
-        const xeroTenantId = req.session.xeroTenantId || await getTenantId(req.session.token);
-        const invoice = await createInvoice(invoiceData, req.session.token, xeroTenantId);
+          const invoiceData = {
+            clientName: extractedData.clientName,
+            clientId: extractedData.clientId,
+            invoiceDate: extractedData.invoiceDate,
+            dueDate: extractedData.dueDate,
+            invoiceNumber: extractedData.invoiceNumber,
+            reference: extractedData.reference,
+            subtotal: extractedData.subtotal,
+            taxAmount: extractedData.taxAmount,
+            totalAmount: extractedData.totalAmount,
+            lineItems: extractedData.lineItems,
+            currency: extractedData.currency
+          };
 
-        response.invoice = invoice;
-        response.message = 'Document processed and invoice created successfully';
-        response.autoCreated = true;
+          logger.info(`Creating invoice in Xero for user ${userId}`, {
+            invoiceNumber: invoiceData.invoiceNumber,
+            clientName: invoiceData.clientName,
+            total: invoiceData.totalAmount,
+            hasAccessToken: !!xeroAccessToken,
+            hasTenantId: !!xeroTenantId
+          });
+
+          const invoice = await createInvoice(invoiceData, xeroAccessToken, xeroTenantId, userId);
+
+          response.invoice = invoice;
+          response.message = 'Document processed and invoice created successfully in Xero';
+          response.autoCreated = true;
+          response.xeroInvoiceId = invoice.InvoiceID;
+
+          logger.info(`Invoice created successfully in Xero`, {
+            userId,
+            invoiceId: invoice.InvoiceID,
+            invoiceNumber: invoiceData.InvoiceNumber
+          });
+        }
       } catch (invoiceError) {
         logger.error('Auto-create invoice error:', invoiceError);
-        response.autoCreateError = 'Failed to auto-create invoice: ' + invoiceError.message;
+        response.autoCreateError = `Failed to create invoice in Xero: ${invoiceError.message}`;
       }
     }
 
@@ -137,9 +161,15 @@ router.post('/extract', authenticateToken, upload.single('document'), async (req
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
-    
-    const userId = req.user.userId;
+
+    const userId = req.user.email || req.user.sub || req.user.id;
     const conversationId = req.body.conversationId || 'default';
+    const { createInXero = false } = req.body; // New option to create invoice immediately
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Invalid token - no user identifier found' });
+    }
+
     logger.info(`Extracting data from: ${req.file.originalname} for user ${userId}`);
 
     // Parse the document
@@ -147,25 +177,62 @@ router.post('/extract', authenticateToken, upload.single('document'), async (req
 
     // Extract data using AI
     const extractedData = await extractInvoiceData(documentText, userId, conversationId);
-    
-    const authHeader = req.headers.authorization || req.headers.Authorization;
-    const xeroAccessToken = authHeader && authHeader.startsWith('Bearer ')
-      ? authHeader.slice(7)
-      : null;
-
-    await createInvoice(extractedData, xeroAccessToken, XERO_TENANT_ID );
 
     // Save extracted data to conversation context for follow-up chat
     setPendingExtractedData(userId, conversationId, extractedData);
 
-    res.json({
+    let response = {
       message: 'Data extracted successfully',
       extractedData,
       documentText: documentText.substring(0, 1000) + (documentText.length > 1000 ? '...' : ''),
       fileName: req.file.originalname,
       fileSize: req.file.size,
       suggestions: generateSuggestions(extractedData)
-    });
+    };
+
+    // Optionally create invoice in Xero after extraction
+    if (createInXero && canAutoCreateInvoice(extractedData)) {
+      try {
+        const xeroAccessToken = TokenStore.getAccessToken(userId);
+        const xeroTenantId = TokenStore.getTenantId(userId);
+
+        if (!xeroAccessToken) {
+          response.xeroError = 'Xero authentication required. Please authenticate with Xero first.';
+        } else {
+          const invoiceData = {
+            clientName: extractedData.clientName,
+            clientId: extractedData.clientId,
+            invoiceDate: extractedData.invoiceDate,
+            dueDate: extractedData.dueDate,
+            invoiceNumber: extractedData.invoiceNumber,
+            reference: extractedData.reference,
+            subtotal: extractedData.subtotal,
+            taxAmount: extractedData.taxAmount,
+            totalAmount: extractedData.totalAmount,
+            lineItems: extractedData.lineItems,
+            currency: extractedData.currency
+          };
+
+          const invoice = await createInvoice(invoiceData, xeroAccessToken, xeroTenantId, userId);
+
+          response.xeroInvoice = invoice;
+          response.message = 'Data extracted and invoice created successfully in Xero';
+          response.xeroCreated = true;
+          response.xeroInvoiceId = invoice.InvoiceID;
+
+          logger.info(`Invoice created in Xero during extraction`, {
+            userId,
+            invoiceId: invoice.InvoiceID,
+            fileName: req.file.originalname
+          });
+        }
+      } catch (xeroError) {
+        logger.error('Xero invoice creation error during extraction:', xeroError);
+        response.xeroError = `Failed to create invoice in Xero: ${xeroError.message}`;
+      }
+    }
+
+    res.json(response);
   } catch (error) {
     logger.error('Extract processing error:', error);
 
@@ -195,34 +262,135 @@ router.get('/supported-types', (req, res) => {
   });
 });
 
+// Create invoice in Xero from extracted data
+router.post('/create-xero-invoice', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.email || req.user.sub || req.user.id;
+    const { extractedData, conversationId = 'default' } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Invalid token - no user identifier found' });
+    }
+
+    if (!extractedData) {
+      return res.status(400).json({ error: 'Extracted data is required' });
+    }
+
+    logger.info(`Creating Xero invoice from extracted data for user ${userId}`);
+
+    // Get stored Xero access token for the user
+    const xeroAccessToken = TokenStore.getAccessToken(userId);
+    const xeroTenantId = TokenStore.getTenantId(userId);
+
+    if (!xeroAccessToken) {
+      return res.status(401).json({
+        error: 'Xero authentication required',
+        message: 'Please authenticate with Xero first to create invoices.'
+      });
+    }
+
+    // Validate extracted data
+    if (!canAutoCreateInvoice(extractedData)) {
+      return res.status(400).json({
+        error: 'Insufficient data to create invoice',
+        message: 'Please ensure client name and total amount are provided.',
+        suggestions: generateSuggestions(extractedData)
+      });
+    }
+
+    const invoiceData = {
+      clientName: extractedData.clientName,
+      clientId: extractedData.clientId,
+      invoiceDate: extractedData.invoiceDate,
+      dueDate: extractedData.dueDate,
+      invoiceNumber: extractedData.invoiceNumber,
+      reference: extractedData.reference,
+      subtotal: extractedData.subtotal,
+      taxAmount: extractedData.taxAmount,
+      totalAmount: extractedData.totalAmount,
+      lineItems: extractedData.lineItems,
+      currency: extractedData.currency
+    };
+
+    logger.info(`Creating invoice in Xero`, {
+      userId,
+      invoiceNumber: invoiceData.invoiceNumber,
+      clientName: invoiceData.clientName,
+      total: invoiceData.totalAmount,
+      lineItemsCount: invoiceData.lineItems?.length || 0
+    });
+
+    const invoice = await createInvoice(invoiceData, xeroAccessToken, xeroTenantId, userId);
+
+    res.json({
+      success: true,
+      message: 'Invoice created successfully in Xero',
+      invoice: invoice,
+      xeroInvoiceId: invoice.InvoiceID,
+      invoiceNumber: invoiceData.invoiceNumber,
+      total: invoiceData.totalAmount
+    });
+
+    logger.info(`Invoice created successfully in Xero`, {
+      userId,
+      invoiceId: invoice.InvoiceID,
+      invoiceNumber: invoiceData.InvoiceNumber
+    });
+
+  } catch (error) {
+    logger.error('Create Xero invoice error:', error);
+    res.status(500).json({
+      error: 'Failed to create invoice in Xero',
+      message: error.message,
+      details: error.response?.data || error.message
+    });
+  }
+});
+
 function canAutoCreateInvoice(extractedData) {
-  return extractedData.clientName &&
+  return extractedData &&
+    extractedData.clientName &&
     extractedData.totalAmount &&
-    extractedData.totalAmount > 0 &&
-    extractedData.confidence > 0.6;
+    parseFloat(extractedData.totalAmount) > 0 &&
+    (extractedData.confidence === undefined || extractedData.confidence > 0.5); // More lenient confidence threshold
 }
 
 function generateSuggestions(extractedData) {
   const suggestions = [];
 
   if (!extractedData.clientName) {
-    suggestions.push('Consider adding client name manually if not detected');
+    suggestions.push('Client name is required to create an invoice in Xero');
   }
 
-  if (!extractedData.totalAmount) {
-    suggestions.push('Please verify the invoice amount was correctly extracted');
+  if (!extractedData.totalAmount || parseFloat(extractedData.totalAmount) <= 0) {
+    suggestions.push('Total amount is required and must be greater than zero');
   }
 
   if (!extractedData.invoiceDate) {
     suggestions.push('Consider adding the invoice date manually');
   }
 
-  if (extractedData.confidence < 0.7) {
+  if (!extractedData.invoiceNumber) {
+    suggestions.push('Invoice number will be auto-generated if not provided');
+  }
+
+  if (extractedData.confidence !== undefined && extractedData.confidence < 0.7) {
     suggestions.push('Low confidence extraction - please review all fields carefully');
   }
 
   if (extractedData.taxAmount && !extractedData.subtotal) {
     suggestions.push('Tax amount detected but no subtotal - please verify amounts');
+  }
+
+  if (!extractedData.lineItems || extractedData.lineItems.length === 0) {
+    suggestions.push('No line items detected - a default line item will be created');
+  }
+
+  // Check if we can auto-create
+  if (canAutoCreateInvoice(extractedData)) {
+    suggestions.push('✅ Ready to create invoice in Xero');
+  } else {
+    suggestions.push('❌ Missing required data for Xero invoice creation');
   }
 
   return suggestions;

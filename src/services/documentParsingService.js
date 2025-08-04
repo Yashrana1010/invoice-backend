@@ -37,6 +37,8 @@ async function parseDocument(filePath, mimeType) {
 
     // Clean up the file
     await fs.unlink(filePath);
+
+    console.log(`Extracted text:`,extractedText);
     
     logger.info(`Successfully extracted ${extractedText.length} characters from document`);
     return extractedText;

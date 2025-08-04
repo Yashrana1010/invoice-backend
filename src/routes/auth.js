@@ -1,92 +1,54 @@
 require('dotenv').config();
 const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const { z } = require('zod');
 const { authenticateToken } = require('../middleware/auth');
-const { validateRequest } = require('../middleware/validation');
 const logger = require('../utils/logger');
-const passport = require('passport');
-const XeroStrategy = require('passport-xero-oauth2').Strategy;
+const TokenStore = require('../services/tokenStore');
 
 const router = express.Router();
 
-// Demo user data (replace with database in production)
-const demoUser = {
-  id: '1',
-  email: 'demo@example.com',
-  password: '$2a$10$8K1p/a0dUZRfTMUSbM6tKeSGCnhI0z1kO5QrJ2YfJYl2JU7S5KJ/6', // demo123
-  name: 'Demo User'
-};
-
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1)
-});
-
-// Login endpoint
-router.post('/login', validateRequest(loginSchema), async (req, res) => {
+// Get current user from Xero token
+router.get('/me', authenticateToken, (req, res) => {
   try {
-    const { email, password } = req.body;
+    const user = req.user;
+    const userId = user.email || user.sub || user.id;
 
-    logger.info(`Login attempt for email: ${email}`);
+    // Extract user info from token
+    const userInfo = {
+      id: userId,
+      email: user.email || userId,
+      name: user.name || `${user.given_name || ''} ${user.family_name || ''}`.trim() || userId,
+      given_name: user.given_name,
+      family_name: user.family_name,
+      xero_userid: user.xero_userid
+    };
 
-    // In production, query database
-    if (email !== demoUser.email) {
-      logger.warn(`Login failed - user not found: ${email}`);
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // For demo purposes, also allow plain text password comparison
-    let isValidPassword = false;
-
-    // Try bcrypt comparison first
-    try {
-      isValidPassword = await bcrypt.compare(password, demoUser.password);
-    } catch (bcryptError) {
-      logger.warn('Bcrypt comparison failed, trying plain text for demo');
-    }
-
-    // Fallback to plain text for demo (remove in production)
-    if (!isValidPassword && password === 'demo123') {
-      isValidPassword = true;
-      logger.info('Demo login using plain text password');
-    }
-
-    if (!isValidPassword) {
-      logger.warn(`Login failed - invalid password for: ${email}`);
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    const token = jwt.sign(
-      { userId: demoUser.id, email: demoUser.email },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    logger.info(`Login successful for: ${email}`);
-
-    res.json({
-      token,
-      user: {
-        id: demoUser.id,
-        email: demoUser.email,
-        name: demoUser.name
-      }
-    });
+    logger.info(`User info retrieved for: ${userId}`);
+    res.json(userInfo);
   } catch (error) {
-    logger.error('Login error:', error);
+    logger.error('Error getting user info:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Get current user
-router.get('/me', authenticateToken, (req, res) => {
-  res.json({
-    id: demoUser.id,
-    email: demoUser.email,
-    name: demoUser.name
-  });
+// Check authentication status
+router.get('/status', authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.email || req.user.sub || req.user.id;
+    const hasXeroTokens = TokenStore.hasValidTokens(userId);
+
+    res.json({
+      authenticated: true,
+      hasXeroTokens,
+      user: {
+        id: userId,
+        email: req.user.email || userId,
+        name: req.user.name || userId
+      }
+    });
+  } catch (error) {
+    logger.error('Error checking auth status:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 module.exports = router;
