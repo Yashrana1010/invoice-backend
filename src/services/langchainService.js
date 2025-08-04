@@ -573,6 +573,7 @@ async function displayInvoiceData(message, userId, conversationId = 'default', a
     return {
       content: response,
       data: null,
+      invoiceData: documentText, // Add the raw invoice data
       sucess: true,
       conversational: true,
     };
