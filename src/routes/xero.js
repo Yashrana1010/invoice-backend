@@ -48,7 +48,7 @@ router.get('/auth', (req, res) => {
 });
 
 // POST /xero/callback - Handle OAuth callback and token exchange
-router.get('/callback', async (req, res) => {
+router.post('/callback', async (req, res) => {
   const requestId = req.requestId || 'unknown';
 
   logger.info(`[${requestId}] Xero OAuth callback received`, {
