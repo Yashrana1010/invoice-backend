@@ -95,8 +95,8 @@ router.get('/auth', (req, res) => {
     authUrl.searchParams.append('client_id', client_id);
     authUrl.searchParams.append('redirect_uri', callback_url);
 
-    // Use scopes from environment variable or fallback to default
-    const scopes = process.env.XERO_SCOPES || 'openid profile email accounting.transactions accounting.contacts accounting.settings accounting.reports.read accounting.journals.read accounting.attachments';
+    // Use scopes from environment variable or fallback to optimal scopes for invoice management
+    const scopes = process.env.XERO_SCOPES || 'openid profile email offline_access accounting.transactions accounting.contacts accounting.attachments accounting.settings.read accounting.reports.read';
     authUrl.searchParams.append('scope', scopes);
     authUrl.searchParams.append('state', state);
 
