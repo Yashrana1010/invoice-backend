@@ -6,6 +6,15 @@ const TokenStore = require('../services/tokenStore');
 
 const router = express.Router();
 
+// Simple in-memory store to track used authorization codes
+const usedCodes = new Set();
+const codeCleanupInterval = 10 * 60 * 1000; // 10 minutes
+
+// Clean up old codes periodically
+setInterval(() => {
+  usedCodes.clear();
+}, codeCleanupInterval);
+
 // Debug endpoint for configuration validation
 router.get('/debug/config', (req, res) => {
   const client_id = process.env.XERO_CLIENT_ID;
@@ -167,11 +176,15 @@ router.get('/callback', async (req, res) => {
 // POST /xero/callback - Handle OAuth callback and token exchange
 router.post('/callback', async (req, res) => {
   const requestId = req.requestId || 'unknown';
+  const startTime = Date.now();
 
   logger.info(`[${requestId}] Xero OAuth callback received`, {
     requestId,
     hasCode: !!req.body.code,
-    hasState: !!req.body.state
+    hasState: !!req.body.state,
+    userAgent: req.get('User-Agent'),
+    origin: req.get('Origin'),
+    referer: req.get('Referer')
   });
 
   try {
@@ -185,10 +198,40 @@ router.post('/callback', async (req, res) => {
       });
     }
 
+    // Check if this code has already been used
+    if (usedCodes.has(code)) {
+      logger.error(`[${requestId}] Authorization code already used`, {
+        requestId,
+        codePrefix: code.substring(0, 10) + '...'
+      });
+      return res.status(400).json({
+        error: 'Authorization code has already been used',
+        requestId,
+        details: 'Please restart the OAuth flow to get a new authorization code'
+      });
+    }
+
+    // Mark this code as used immediately to prevent race conditions
+    usedCodes.add(code);
+
+    // Validate code format and age
+    if (code.length < 10) {
+      logger.error(`[${requestId}] Authorization code appears invalid`, {
+        requestId,
+        codeLength: code.length
+      });
+      return res.status(400).json({
+        error: 'Invalid authorization code format',
+        requestId
+      });
+    }
+
     logger.info(`[${requestId}] Processing authorization code`, {
       requestId,
       codeLength: code.length,
-      state: state
+      codePrefix: code.substring(0, 10) + '...',
+      state: state,
+      processingTime: Date.now() - startTime
     });
 
     // Get environment variables
@@ -228,10 +271,11 @@ router.post('/callback', async (req, res) => {
     logger.info(`[${requestId}] Sending token exchange request to Xero`, {
       requestId,
       grantType: tokenData.grant_type,
-      redirectUri: tokenData.redirect_uri
+      redirectUri: tokenData.redirect_uri,
+      codeAge: Date.now() - startTime
     });
 
-    const startTime = Date.now();
+    const tokenExchangeStart = Date.now();
 
     const response = await axios.post(
       'https://identity.xero.com/connect/token',
@@ -241,12 +285,13 @@ router.post('/callback', async (req, res) => {
           'Authorization': `Basic ${basicAuth}`,
           'Content-Type': 'application/x-www-form-urlencoded',
           'Accept': 'application/json',
+          'User-Agent': 'Invoice-Manager/1.0'
         },
-        timeout: 15000, // 15 seconds
+        timeout: 10000, // Reduced to 10 seconds - faster failure
       }
     );
 
-    const responseTime = Date.now() - startTime;
+    const responseTime = Date.now() - tokenExchangeStart;
 
     logger.info(`[${requestId}] Token exchange successful`, {
       requestId,
@@ -368,7 +413,13 @@ router.post('/callback', async (req, res) => {
     res.json(responseData);
 
   } catch (error) {
-    const responseTime = Date.now() - (req.startTime || Date.now());
+    // Remove the code from used set if there was an error (except for invalid_grant)
+    if (req.body.code && error.response?.data?.error !== 'invalid_grant') {
+      usedCodes.delete(req.body.code);
+      logger.info(`[${requestId}] Removed code from used set due to non-grant error`);
+    }
+
+    const responseTime = Date.now() - startTime;
 
     // Enhanced error logging with debug information
     logger.error(`[${requestId}] Token exchange failed - Enhanced Debug`, {
